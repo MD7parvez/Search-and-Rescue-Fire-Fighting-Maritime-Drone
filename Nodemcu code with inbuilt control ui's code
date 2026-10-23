@@ -1,0 +1,371 @@
+
+#include <ESP8266WiFi.h>
+#include <ESP8266WebServer.h>
+#include <SoftwareSerial.h>
+#include <Servo.h>
+
+// Replace with your Wi-Fi credentials.
+const char* WIFI_SSID = "Parvez";
+const char* WIFI_PASSWORD = "   parvez777";
+
+ESP8266WebServer server(80);
+
+// NodeMCU RX, TX: D6, D5
+SoftwareSerial nanoLink(D6, D5);
+
+Servo scanner;
+Servo rudder;
+
+// GPIO pin assignments
+const byte SCAN_SERVO_PIN = D1;
+const byte RUDDER_SERVO_PIN = D2;
+const byte TRIG_PIN = D7;
+const byte ECHO_PIN = D0;
+
+bool scanEnabled = false;
+int scanAngle = 20;
+int scanDirection = 1;
+int rudderAngle = 90;
+
+long distanceCm = -1;
+int fireDetected = 0;
+int pumpOn = 0;
+int fireArmed = 0;
+
+unsigned long lastScan = 0;
+unsigned long lastPing = 0;
+unsigned long lastNanoStatus = 0;
+
+String nanoLine = "";
+
+long readDistance() {
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(3);
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+
+  unsigned long duration =
+      pulseIn(ECHO_PIN, HIGH, 25000UL);
+
+  if (duration == 0) return -1;
+  return duration / 58;
+}
+
+void sendNano(String command) {
+  nanoLink.println(command);
+}
+
+void readNanoMessages() {
+  while (nanoLink.available()) {
+    char c = nanoLink.read();
+
+    if (c == '\n' || c == '\r') {
+      if (nanoLine.startsWith("STATUS,")) {
+        int p;
+
+        p = nanoLine.indexOf("FIRE=");
+        if (p >= 0)
+          fireDetected = nanoLine.substring(p + 5).toInt();
+
+        p = nanoLine.indexOf("ARMED=");
+        if (p >= 0)
+          fireArmed = nanoLine.substring(p + 6).toInt();
+
+        p = nanoLine.indexOf("PUMP=");
+        if (p >= 0)
+          pumpOn = nanoLine.substring(p + 5).toInt();
+
+        lastNanoStatus = millis();
+      }
+
+      nanoLine = "";
+    } else if (nanoLine.length() < 100) {
+      nanoLine += c;
+    } else {
+      nanoLine = "";
+    }
+  }
+}
+
+const char PAGE[] PROGMEM = R"HTML(
+<!doctype html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MAR-SAR Control</title>
+<style>
+body {
+  background:#101820;color:#edf6f9;
+  font:16px Arial,sans-serif;
+  max-width:650px;margin:auto;padding:16px
+}
+.card {
+  background:#1d2a35;border-radius:12px;
+  padding:16px;margin:12px 0
+}
+button {
+  padding:13px;margin:4px;border:0;
+  border-radius:8px;font-weight:bold;
+  background:#238b79;color:white
+}
+.stop {background:#b23b45}
+input {width:100%}
+canvas {
+  width:100%;background:#061a20;
+  border-radius:10px
+}
+.grid {display:flex;flex-wrap:wrap;justify-content:center}
+#status {white-space:pre-line}
+</style>
+</head>
+<body>
+<h2>MAR-SAR Control</h2>
+<p>Local maritime search and rescue prototype</p>
+
+<div class="card">
+<h3>System status</h3>
+<div id="status">Connecting...</div>
+</div>
+
+<div class="card">
+<h3>Ultrasonic radar</h3>
+<canvas id="radar" width="320" height="260"></canvas>
+<p id="range">Waiting for measurements...</p>
+<button onclick="cmd('SCAN_ON')">Start scan</button>
+<button class="stop" onclick="cmd('SCAN_OFF')">Stop scan</button>
+</div>
+
+<div class="card">
+<h3>Rudder</h3>
+<div class="grid">
+<button onclick="cmd('RUDDER_LEFT')">Left</button>
+<button onclick="cmd('RUDDER_CENTER')">Center</button>
+<button onclick="cmd('RUDDER_RIGHT')">Right</button>
+</div>
+<label>Rudder angle: <span id="angle">90</span>&deg;</label>
+<input type="range" min="45" max="135" value="90"
+onchange="cmd('RUDDER_SET_'+this.value)">
+</div>
+
+<div class="card">
+<h3>Fire response</h3>
+<p>Arm only when supervised and ready.</p>
+<button onclick="cmd('FIRE_ARM')">Arm fire response</button>
+<button class="stop" onclick="cmd('FIRE_DISARM')">
+Disarm and turn pump off
+</button>
+<p id="fire">Fire system status unavailable</p>
+</div>
+
+<script>
+let latest = {angle:20,distance:-1};
+let scanOn = false;
+
+async function cmd(c) {
+  try {
+    await fetch('/api/cmd?cmd='+encodeURIComponent(c),
+      {cache:'no-store'});
+  } catch(e) {
+    document.getElementById('status').textContent =
+      'Controller connection lost';
+  }
+}
+
+async function update() {
+  try {
+    const r = await fetch('/api/status',
+      {cache:'no-store'});
+    const d = await r.json();
+
+    latest = d;
+    scanOn = d.scan;
+    document.getElementById('angle').textContent =
+      d.rudder;
+    document.getElementById('range').textContent =
+      d.distance < 0 ? 'No echo detected' :
+      'Distance: '+d.distance+' cm at '+d.scanAngle+'°';
+
+    document.getElementById('status').textContent =
+      'Wi-Fi: connected to controller\n' +
+      'Scanner: '+(d.scan?'running':'stopped')+
+      '\nNano link: '+(d.nanoOnline?'online':'not responding');
+
+    document.getElementById('fire').textContent =
+      'Fire detected: '+(d.fire?'YES':'NO')+
+      '\nPump reported: '+(d.pump?'ON':'OFF')+
+      '\nArmed: '+(d.armed?'YES':'NO');
+  } catch(e) {}
+}
+
+function drawRadar() {
+  const canvas = document.getElementById('radar');
+  const ctx = canvas.getContext('2d');
+  const cx = 160, cy = 235, radius = 205;
+
+  ctx.clearRect(0,0,320,260);
+  ctx.strokeStyle='#236c61';
+  ctx.lineWidth=1;
+
+  [50,100,150,200].forEach(r => {
+    ctx.beginPath();
+    ctx.arc(cx,cy,r,Math.PI,2*Math.PI);
+    ctx.stroke();
+  });
+
+  [0,45,90,135,180].forEach(a => {
+    const t = Math.PI + a*Math.PI/180;
+    ctx.beginPath();
+    ctx.moveTo(cx,cy);
+    ctx.lineTo(cx+radius*Math.cos(t),
+                cy+radius*Math.sin(t));
+    ctx.stroke();
+  });
+
+  const a = Math.PI + latest.angle*Math.PI/180;
+  ctx.strokeStyle='#46edb0';
+  ctx.lineWidth=2;
+  ctx.beginPath();
+  ctx.moveTo(cx,cy);
+  ctx.lineTo(cx+radius*Math.cos(a),
+              cy+radius*Math.sin(a));
+  ctx.stroke();
+
+  if (latest.distance >= 0 && latest.distance <= 400) {
+    const r = latest.distance/400*radius;
+    ctx.fillStyle='#ffd166';
+    ctx.beginPath();
+    ctx.arc(cx+r*Math.cos(a),cy+r*Math.sin(a),5,0,2*Math.PI);
+    ctx.fill();
+  }
+
+  ctx.fillStyle='#cceee5';
+  ctx.font='11px Arial';
+  ctx.fillText('0°',8,230);
+  ctx.fillText('90°',151,17);
+  ctx.fillText('180°',280,230);
+  requestAnimationFrame(drawRadar);
+}
+
+setInterval(update,500);
+drawRadar();
+update();
+</script>
+</body>
+</html>
+)HTML";
+
+void sendStatus() {
+  String json = "{";
+  json += "\"scan\":" + String(scanEnabled ? "true" : "false");
+  json += ",\"scanAngle\":" + String(scanAngle);
+  json += ",\"distance\":" + String(distanceCm);
+  json += ",\"rudder\":" + String(rudderAngle);
+  json += ",\"fire\":" + String(fireDetected ? "true" : "false");
+  json += ",\"armed\":" + String(fireArmed ? "true" : "false");
+  json += ",\"pump\":" + String(pumpOn ? "true" : "false");
+  json += ",\"nanoOnline\":" +
+      String(millis() - lastNanoStatus < 2000 ? "true" : "false");
+  json += ",\"anomaly\":false";
+  json += "}";
+
+  server.send(200, "application/json", json);
+}
+
+void handleCommand() {
+  String c = server.arg("cmd");
+  c.toUpperCase();
+
+  if (c == "SCAN_ON") {
+    scanEnabled = true;
+  } else if (c == "SCAN_OFF") {
+    scanEnabled = false;
+  } else if (c == "RUDDER_LEFT") {
+    rudderAngle = 60;
+    rudder.write(rudderAngle);
+  } else if (c == "RUDDER_CENTER") {
+    rudderAngle = 90;
+    rudder.write(rudderAngle);
+  } else if (c == "RUDDER_RIGHT") {
+    rudderAngle = 120;
+    rudder.write(rudderAngle);
+  } else if (c.startsWith("RUDDER_SET_")) {
+    int value = c.substring(11).toInt();
+    if (value >= 45 && value <= 135) {
+      rudderAngle = value;
+      rudder.write(rudderAngle);
+    }
+  } else if (c == "FIRE_ARM") {
+    sendNano("FIRE ARM");
+  } else if (c == "FIRE_DISARM") {
+    sendNano("FIRE DISARM");
+  } else {
+    server.send(400, "text/plain", "Unknown command");
+    return;
+  }
+
+  server.send(200, "text/plain", "OK");
+}
+
+void setup() {
+  Serial.begin(115200);
+  nanoLink.begin(9600);
+
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+  digitalWrite(TRIG_PIN, LOW);
+
+  scanner.attach(SCAN_SERVO_PIN);
+  rudder.attach(RUDDER_SERVO_PIN);
+  scanner.write(scanAngle);
+  rudder.write(rudderAngle);
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(300);
+    yield();
+  }
+
+  Serial.print("Dashboard: http://");
+  Serial.println(WiFi.localIP());
+
+  server.on("/", HTTP_GET, []() {
+    server.send_P(200, "text/html", PAGE);
+  });
+
+  server.on("/api/status", HTTP_GET, sendStatus);
+  server.on("/api/cmd", HTTP_GET, handleCommand);
+  server.begin();
+}
+
+void loop() {
+  server.handleClient();
+  readNanoMessages();
+
+  unsigned long now = millis();
+
+  if (scanEnabled && now - lastScan >= 150) {
+    lastScan = now;
+
+    scanner.write(scanAngle);
+
+    scanAngle += scanDirection * 10;
+
+    if (scanAngle >= 160) {
+      scanAngle = 160;
+      scanDirection = -1;
+    } else if (scanAngle <= 20) {
+      scanAngle = 20;
+      scanDirection = 1;
+    }
+  }
+
+  if (scanEnabled && now - lastPing >= 180) {
+    lastPing = now;
+    distanceCm = readDistance();
+  }
+
+  yield();
+}
