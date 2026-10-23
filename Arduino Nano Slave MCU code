@@ -1,0 +1,108 @@
+
+#include <SoftwareSerial.h>
+
+// Nano RX, TX; connect to NodeMCU TX, RX respectively.
+SoftwareSerial link(10, 11);
+
+const byte FIRE_PIN = 2;
+const byte PUMP_RELAY_PIN = 4;
+
+// Change to false if your flame sensor outputs HIGH on detection.
+const bool FIRE_ACTIVE_LOW = true;
+
+// Change if your relay module is active-low.
+const bool RELAY_ACTIVE_HIGH = true;
+
+bool armed = false;
+bool fireDetected = false;
+bool pumpOn = false;
+
+unsigned long lastReport = 0;
+
+bool readFireSensor() {
+  int value = digitalRead(FIRE_PIN);
+  return FIRE_ACTIVE_LOW ? value == LOW : value == HIGH;
+}
+
+void setPump(bool enabled) {
+  pumpOn = enabled;
+
+  digitalWrite(
+    PUMP_RELAY_PIN,
+    enabled == RELAY_ACTIVE_HIGH ? HIGH : LOW
+  );
+}
+
+void reportStatus() {
+  link.print("STATUS,FIRE=");
+  link.print(fireDetected ? 1 : 0);
+  link.print(",ARMED=");
+  link.print(armed ? 1 : 0);
+  link.print(",PUMP=");
+  link.println(pumpOn ? 1 : 0);
+}
+
+void handleCommand(String cmd) {
+  cmd.trim();
+  cmd.toUpperCase();
+
+  if (cmd == "FIRE ARM") {
+    armed = true;
+    link.println("ACK,FIRE_ARMED");
+  }
+  else if (cmd == "FIRE DISARM") {
+    armed = false;
+    setPump(false);
+    link.println("ACK,FIRE_DISARMED");
+  }
+  else if (cmd == "STATUS") {
+    reportStatus();
+  }
+  else {
+    link.println("ERR,UNKNOWN_COMMAND");
+  }
+}
+
+void setup() {
+  pinMode(FIRE_PIN, INPUT);
+  pinMode(PUMP_RELAY_PIN, OUTPUT);
+
+  // Pump remains off at startup.
+  setPump(false);
+
+  link.begin(9600);
+  Serial.begin(9600);
+
+  link.println("NANO_READY");
+}
+
+void loop() {
+  static String command = "";
+
+  while (link.available()) {
+    char c = link.read();
+
+    if (c == '\n' || c == '\r') {
+      if (command.length()) {
+        handleCommand(command);
+        command = "";
+      }
+    } else if (command.length() < 40) {
+      command += c;
+    } else {
+      command = "";
+      setPump(false);
+      armed = false;
+    }
+  }
+
+  fireDetected = readFireSensor();
+
+  // Both conditions must be true.
+  setPump(armed && fireDetected);
+
+  if (millis() - lastReport >= 500) {
+    lastReport = millis();
+    reportStatus();
+  }
+}
