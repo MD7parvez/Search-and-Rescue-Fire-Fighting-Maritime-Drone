@@ -13,7 +13,11 @@ Built solo in one day, mostly from parts salvaged from my anti-submarine maritim
 
 ## Photos
 
-Photos have not yet been added to this repository.
+![Search & Rescue and Firefighting Maritime Drone prototype](https://drive.google.com/uc?export=view&id=1yOxwG1xEKaKG5t8dVIzGnl28BYlWiQ7u)
+
+[Open the original photo on Google Drive](https://drive.google.com/file/d/1yOxwG1xEKaKG5t8dVIzGnl28BYlWiQ7u/view?usp=drivesdk)
+
+The image is embedded from Google Drive; it has not yet been uploaded as a file inside this repository.
 
 ## Note on code
 
