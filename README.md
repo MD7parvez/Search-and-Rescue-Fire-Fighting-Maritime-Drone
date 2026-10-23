@@ -1,6 +1,6 @@
 # Search & Rescue and Firefighting Maritime Drone
 
-Built solo in one day, mostly from parts salvaged from my anti-submarine maritime drone.
+Solo-built Wi-Fi controlled rescue and firefighting boat drone, made in one day from salvaged parts.
 
 ## How it worked
 
